@@ -4,8 +4,9 @@ from langchain.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
-from src.forms.model.fields import NumberField, NumberInputField
-from src.forms.model.human_input import FieldInputRequest
+from src.forms.model.human_input import request_number_input, parse_number_input, request_text_input, \
+    parse_text_input, parse_date_input, request_date_input, request_radio_input, parse_radio_input, \
+    parse_checkbox_input, request_checkbox_input
 
 model = ChatOpenAI(
     model="gpt-5-mini",
@@ -20,46 +21,102 @@ model = ChatOpenAI(
 def ask_number(question: str) -> str:
     """Ask user for any number with a given question"""
 
-    response = interrupt(
-        FieldInputRequest(
-            field=NumberField(
+    provided_number = parse_number_input(
+        interrupt(
+            request_number_input(
                 description=question
             )
         )
     )
 
-    number_response = NumberInputField.model_validate(response)
-
-    return f"Number: {number_response.value}"
+    return f"Number: {provided_number}"
 
 @tool
-def ask_text() -> str:
-    """Ask user for any text"""
+def ask_text(question: str) -> str:
+    """Ask user for any text with a given question"""
 
-    text = interrupt("Provide the text")
+    provided_text = parse_text_input(
+        interrupt(
+            request_text_input(
+                description=question
+            )
+        )
+    )
 
-    return f"Result: {text}"
+    return f"Result: {provided_text}"
 
+@tool
+def ask_date(question: str) -> str:
+    """Ask user for any date with a given question"""
+
+    provided_text = parse_date_input(
+        interrupt(
+            request_date_input(
+                description=question
+            )
+        )
+    )
+
+    return f"Result: {provided_text}"
+
+@tool
+def ask_to_choose_one(question: str, options: list[str]) -> str:
+    """Ask user to choose one option from multiple options with a given question"""
+
+    options = request_radio_input(
+        description=question,
+        options=options
+    )
+
+    response = interrupt(options)
+
+    chosen_option = parse_radio_input(response)
+
+    return f"Result: {chosen_option}"
+
+
+@tool
+def ask_to_choose_multiple(question: str, options: list[str]) -> str:
+    """Ask user to choose multiple options from multiple options with a given question"""
+
+    options = request_checkbox_input(
+        description=question,
+        options=options
+    )
+
+    response = interrupt(options)
+
+    chosen_option = parse_checkbox_input(response)
+
+    return f"Result: {chosen_option}"
 
 checkpointer = MemorySaver()
 
+# 1. User's name - text
+# 2. User's age - number
+# 3. Payment method - one of the following: Credit card, Bank account, Cash
+# 4.
+
 simple_agent = create_agent(
     model=model,
-    tools=[ask_number, ask_text],
+    tools=[ask_number, ask_text, ask_date, ask_to_choose_one, ask_to_choose_multiple],
     system_prompt=f"""
     You are the agent who requires the users to provide the following information:
     
     1. User's name - text
-    2. User's age - number
+    2. Oder date - date
+    3. Food order - multiple of the following: Burger, Fries, Onion rings, Soda, Cake
+    4. Payment method - one of the following: Credit card, Bank account, Cash
     
 
     After user has provided all information, summarize it for the user.
-    
+
     You can also be asked to amend information.
-    
+
     Use the appropriate tools to request the user to provide missing information or amend it.
-    
+
     When asked to provide information, ask one by one.
+
     """,
     checkpointer=checkpointer
 )

@@ -1,0 +1,1203 @@
+# Next.js Dashboard Project Guidelines
+
+This is the official Next.js Dashboard example project demonstrating modern Next.js 15+ best practices with App Router, Server Components, and Server Actions.
+
+## Project Overview
+
+A full-stack dashboard application for managing invoices and customers with:
+- User authentication (NextAuth)
+- CRUD operations for invoices
+- PostgreSQL database with raw SQL queries
+- Server-side rendering and streaming
+- Form validation and error handling
+- Responsive design with Tailwind CSS
+
+## Tech Stack
+
+### Core Framework
+- **Next.js** (v15+) - Full-stack React framework with App Router
+- **React** (latest) - UI library with Server Components
+- **TypeScript** (5.7.3) - Strict mode enabled
+
+### Database & Authentication
+- **PostgreSQL** - Using `postgres` npm package (raw SQL, NOT an ORM)
+- **NextAuth** (5.0.0-beta.25) - Credentials-based authentication
+- **bcrypt** - Password hashing
+
+### UI & Styling
+- **Tailwind CSS** (3.4.17) - Utility-first CSS framework
+- **@tailwindcss/forms** - Form styling plugin
+- **@heroicons/react** - Icon library (use `/24/outline` for line icons)
+- **clsx** - Conditional className utility
+
+### Validation & Utilities
+- **Zod** (3.25.17) - Schema validation for forms
+- **use-debounce** - Debouncing for search inputs
+
+## Architecture Patterns
+
+### Server-Centric Architecture
+This project follows a server-first approach:
+
+1. **Server Components by Default**: All components are Server Components unless marked with `'use client'`
+2. **Server Actions for Mutations**: Form submissions use Server Actions marked with `'use server'`
+3. **No Client-Side Data Fetching**: All data fetching happens on the server
+4. **Progressive Enhancement**: Forms work without JavaScript
+
+### File Structure Convention
+
+```
+app/
+├── dashboard/              # Protected dashboard area
+│   ├── (overview)/        # Route group - doesn't affect URL
+│   │   └── page.tsx       # -> /dashboard
+│   ├── invoices/
+│   │   ├── page.tsx       # -> /dashboard/invoices
+│   │   ├── create/
+│   │   │   └── page.tsx   # -> /dashboard/invoices/create
+│   │   └── [id]/
+│   │       └── edit/
+│   │           └── page.tsx  # -> /dashboard/invoices/[id]/edit
+│   └── layout.tsx         # Shared layout for all dashboard pages
+├── lib/                    # Shared utilities (NOT "utils" or "helpers")
+│   ├── definitions.ts     # TypeScript type definitions
+│   ├── data.ts            # Server-side data fetching functions
+│   ├── actions.ts         # Server Actions for mutations
+│   └── utils.ts           # Helper functions
+├── ui/                     # Reusable UI components (NOT "components")
+│   ├── dashboard/         # Dashboard-specific components
+│   ├── invoices/          # Invoice-specific components
+│   ├── global.css         # Global Tailwind imports
+│   ├── fonts.ts           # Font definitions
+│   └── skeletons.tsx      # Loading skeleton components
+├── login/
+├── layout.tsx             # Root layout
+└── page.tsx               # Home page
+```
+
+**Key Conventions:**
+- Components go in `/app/ui/` (NOT `/components`)
+- Utilities go in `/app/lib/` (NOT `/utils`)
+- Organize by feature/domain, not by type
+- Use route groups `(overview)` to organize without affecting URLs
+
+## Component Patterns
+
+### Server Components (Default)
+
+Server Components can:
+- Be async functions
+- Fetch data directly
+- Access databases and APIs
+- Use environment variables safely
+
+```typescript
+// app/ui/dashboard/cards.tsx
+import { fetchCardData } from '@/app/lib/data';
+
+export default async function CardWrapper() {
+  const {
+    numberOfInvoices,
+    numberOfCustomers,
+    totalPaidInvoices,
+    totalPendingInvoices,
+  } = await fetchCardData();
+
+  return (
+    <>
+      <Card title="Collected" value={totalPaidInvoices} type="collected" />
+      <Card title="Pending" value={totalPendingInvoices} type="pending" />
+      <Card title="Total Invoices" value={numberOfInvoices} type="invoices" />
+      <Card title="Total Customers" value={numberOfCustomers} type="customers" />
+    </>
+  );
+}
+```
+
+### Client Components
+
+Mark with `'use client'` directive when you need:
+- Event handlers (onClick, onChange, etc.)
+- React hooks (useState, useEffect, useActionState, etc.)
+- Browser APIs
+- URL hooks (usePathname, useSearchParams, useRouter)
+
+```typescript
+'use client';
+
+import { useActionState } from 'react';
+import { createInvoice, State } from '@/app/lib/actions';
+
+export default function Form({ customers }: { customers: CustomerField[] }) {
+  const initialState: State = { message: null, errors: {} };
+  const [state, formAction] = useActionState(createInvoice, initialState);
+
+  return (
+    <form action={formAction}>
+      {/* Form fields */}
+    </form>
+  );
+}
+```
+
+### Component Naming
+- PascalCase for components: `CardWrapper`, `LoginForm`, `InvoicesTable`
+- Place in domain-specific folders: `ui/dashboard/`, `ui/invoices/`
+- One component per file (exceptions for small related components)
+
+## Data Fetching Patterns
+
+### Database Access
+
+Always use the `postgres` client with parameterized queries:
+
+```typescript
+// app/lib/data.ts
+import postgres from 'postgres';
+
+const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+
+export async function fetchInvoiceById(id: string) {
+  try {
+    const data = await sql<InvoiceForm[]>`
+      SELECT
+        invoices.id,
+        invoices.customer_id,
+        invoices.amount,
+        invoices.status
+      FROM invoices
+      WHERE invoices.id = ${id};
+    `;
+
+    const invoice = data.map((invoice) => ({
+      ...invoice,
+      amount: invoice.amount / 100,
+    }));
+
+    return invoice[0];
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch invoice.');
+  }
+}
+```
+
+**Database Guidelines:**
+- Use raw SQL with parameterized queries (NOT an ORM)
+- Type query results: `sql<TypeName[]>`
+- Always use template literals for parameterization: `` sql`WHERE id = ${id}` ``
+- Handle errors with try-catch
+- Log errors to console
+- Throw descriptive error messages
+
+### Parallel Data Fetching
+
+Use `Promise.all()` for parallel queries:
+
+```typescript
+export async function fetchCardData() {
+  try {
+    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
+    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
+    const invoiceStatusPromise = sql`SELECT
+         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
+         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
+         FROM invoices`;
+
+    const data = await Promise.all([
+      invoiceCountPromise,
+      customerCountPromise,
+      invoiceStatusPromise,
+    ]);
+
+    // Process data...
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch card data.');
+  }
+}
+```
+
+### Streaming with Suspense
+
+Use Suspense boundaries to stream content and show loading states:
+
+```typescript
+// app/dashboard/(overview)/page.tsx
+import { Suspense } from 'react';
+import { CardsSkeleton, RevenueChartSkeleton } from '@/app/ui/skeletons';
+
+export default async function Page() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        <Suspense fallback={<CardsSkeleton />}>
+          <CardWrapper />
+        </Suspense>
+      </div>
+      <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-4 lg:grid-cols-8">
+        <Suspense fallback={<RevenueChartSkeleton />}>
+          <RevenueChart />
+        </Suspense>
+      </div>
+    </main>
+  );
+}
+```
+
+## Server Actions & Form Handling
+
+### Server Actions File Structure
+
+All Server Actions go in `/app/lib/actions.ts` with `'use server'` directive:
+
+```typescript
+'use server';
+
+import { z } from 'zod';
+import postgres from 'postgres';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+
+// Define Zod schema
+const FormSchema = z.object({
+  id: z.string(),
+  customerId: z.string({
+    invalid_type_error: 'Please select a customer.',
+  }),
+  amount: z.coerce
+    .number()
+    .gt(0, { message: 'Please enter an amount greater than $0.' }),
+  status: z.enum(['pending', 'paid'], {
+    invalid_type_error: 'Please select an invoice status.',
+  }),
+  date: z.string(),
+});
+
+// Omit fields as needed for create/update
+const CreateInvoice = FormSchema.omit({ id: true, date: true });
+
+// Define state type
+export type State = {
+  errors?: {
+    customerId?: string[];
+    amount?: string[];
+    status?: string[];
+  };
+  message?: string | null;
+};
+
+export async function createInvoice(prevState: State, formData: FormData) {
+  // 1. Validate with Zod
+  const validatedFields = CreateInvoice.safeParse({
+    customerId: formData.get('customerId'),
+    amount: formData.get('amount'),
+    status: formData.get('status'),
+  });
+
+  // 2. Return errors if validation fails
+  if (!validatedFields.success) {
+    return {
+      errors: validatedFields.error.flatten().fieldErrors,
+      message: 'Missing Fields. Failed to Create Invoice.',
+    };
+  }
+
+  // 3. Prepare data
+  const { customerId, amount, status } = validatedFields.data;
+  const amountInCents = amount * 100;
+  const date = new Date().toISOString().split('T')[0];
+
+  // 4. Database operation
+  try {
+    await sql`
+      INSERT INTO invoices (customer_id, amount, status, date)
+      VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
+    `;
+  } catch (error) {
+    return {
+      message: 'Database Error: Failed to Create Invoice.',
+    };
+  }
+
+  // 5. Revalidate and redirect
+  revalidatePath('/dashboard/invoices');
+  redirect('/dashboard/invoices');
+}
+```
+
+### Form Components with useActionState
+
+Client components use `useActionState` hook to connect to Server Actions:
+
+```typescript
+'use client';
+
+import { useActionState } from 'react';
+import { createInvoice, State } from '@/app/lib/actions';
+
+export default function Form({ customers }: { customers: CustomerField[] }) {
+  const initialState: State = { message: null, errors: {} };
+  const [state, formAction] = useActionState(createInvoice, initialState);
+
+  return (
+    <form action={formAction}>
+      <div className="rounded-md bg-gray-50 p-4 md:p-6">
+        {/* Field */}
+        <div className="mb-4">
+          <label htmlFor="customer" className="mb-2 block text-sm font-medium">
+            Choose customer
+          </label>
+          <select
+            id="customer"
+            name="customerId"
+            className="peer block w-full rounded-md border"
+            defaultValue=""
+            aria-describedby="customer-error"
+          >
+            <option value="" disabled>Select a customer</option>
+            {customers.map((customer) => (
+              <option key={customer.id} value={customer.id}>
+                {customer.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Error display */}
+          <div id="customer-error" aria-live="polite" aria-atomic="true">
+            {state.errors?.customerId &&
+              state.errors.customerId.map((error: string) => (
+                <p className="mt-2 text-sm text-red-500" key={error}>
+                  {error}
+                </p>
+              ))}
+          </div>
+        </div>
+
+        {/* General error message */}
+        <div aria-live="polite" aria-atomic="true">
+          {state.message && (
+            <p className="mt-2 text-sm text-red-500">{state.message}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-6 flex justify-end gap-4">
+        <Link href="/dashboard/invoices">Cancel</Link>
+        <Button type="submit">Create Invoice</Button>
+      </div>
+    </form>
+  );
+}
+```
+
+### Form Validation Pattern
+
+1. **Define Zod schema** with custom error messages
+2. **Use `.safeParse()`** to validate FormData
+3. **Return errors** in the State object
+4. **Display errors** with ARIA attributes for accessibility
+5. **Revalidate path** after successful mutation
+6. **Redirect** to appropriate page
+
+## TypeScript Patterns
+
+### Type Definitions
+
+All types go in `/app/lib/definitions.ts`:
+
+```typescript
+// app/lib/definitions.ts
+
+// Database models
+export type User = {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+};
+
+export type Invoice = {
+  id: string;
+  customer_id: string;
+  amount: number;
+  date: string;
+  status: 'pending' | 'paid';  // Use string union types
+};
+
+// View models (for forms)
+export type InvoiceForm = {
+  id: string;
+  customer_id: string;
+  amount: number;
+  status: 'pending' | 'paid';
+};
+
+// Table display types
+export type InvoicesTable = {
+  id: string;
+  customer_id: string;
+  name: string;
+  email: string;
+  image_url: string;
+  date: string;
+  amount: number;
+  status: 'pending' | 'paid';
+};
+```
+
+### Component Props
+
+```typescript
+// Extend HTML element props
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  children: React.ReactNode;
+}
+
+// Simple props
+interface FormProps {
+  customers: CustomerField[];
+}
+
+// Page props with searchParams (App Router)
+interface PageProps {
+  searchParams?: Promise<{
+    query?: string;
+    page?: string;
+  }>;
+}
+```
+
+### Configuration
+
+TypeScript is in strict mode with path aliases:
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
+```
+
+**Always use `@/` imports:**
+```typescript
+import { auth } from '@/auth';
+import { fetchInvoices } from '@/app/lib/data';
+import { Button } from '@/app/ui/button';
+```
+
+## Routing Conventions
+
+### App Router Structure
+
+- Use `page.tsx` for routes
+- Use `layout.tsx` for shared layouts
+- Use `loading.tsx` for loading UI (optional, prefer Suspense)
+- Use `error.tsx` for error boundaries (if needed)
+
+### Dynamic Routes
+
+```
+app/dashboard/invoices/[id]/edit/page.tsx
+```
+
+Access params:
+
+```typescript
+export default async function Page({ params }: { params: { id: string } }) {
+  const id = params.id;
+  // ...
+}
+```
+
+### Route Groups
+
+Use parentheses to organize routes without affecting URLs:
+
+```
+app/dashboard/(overview)/page.tsx  ->  /dashboard
+```
+
+### Search Params and Pagination
+
+```typescript
+// Page component
+export default async function Page(props: {
+  searchParams?: Promise<{
+    query?: string;
+    page?: string;
+  }>;
+}) {
+  const searchParams = await props.searchParams;
+  const query = searchParams?.query || '';
+  const currentPage = Number(searchParams?.page) || 1;
+
+  const totalPages = await fetchInvoicesPages(query);
+
+  return (
+    <div>
+      <Search placeholder="Search invoices..." />
+      <Suspense key={query + currentPage} fallback={<InvoicesTableSkeleton />}>
+        <Table query={query} currentPage={currentPage} />
+      </Suspense>
+      <Pagination totalPages={totalPages} />
+    </div>
+  );
+}
+```
+
+### Search Component with Debouncing
+
+```typescript
+'use client';
+
+import { useDebouncedCallback } from 'use-debounce';
+import { useSearchParams, usePathname, useRouter } from 'next/navigation';
+
+export default function Search({ placeholder }: { placeholder: string }) {
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const { replace } = useRouter();
+
+  const handleSearch = useDebouncedCallback((term: string) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('page', '1');  // Reset to page 1 on new search
+
+    if (term) {
+      params.set('query', term);
+    } else {
+      params.delete('query');
+    }
+
+    replace(`${pathname}?${params.toString()}`);
+  }, 300);  // 300ms debounce
+
+  return (
+    <input
+      placeholder={placeholder}
+      onChange={(e) => handleSearch(e.target.value)}
+      defaultValue={searchParams.get('query')?.toString()}
+    />
+  );
+}
+```
+
+## Styling with Tailwind CSS
+
+### Tailwind Configuration
+
+Custom colors and extensions in `tailwind.config.ts`:
+
+```typescript
+const config: Config = {
+  content: [
+    './pages/**/*.{js,ts,jsx,tsx,mdx}',
+    './components/**/*.{js,ts,jsx,tsx,mdx}',
+    './app/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: {
+    extend: {
+      gridTemplateColumns: {
+        '13': 'repeat(13, minmax(0, 1fr))',
+      },
+      colors: {
+        blue: {
+          400: '#2589FE',
+          500: '#0070F3',
+          600: '#2F6FEB',
+        },
+      },
+    },
+    keyframes: {
+      shimmer: {
+        '100%': { transform: 'translateX(100%)' },
+      },
+    },
+  },
+  plugins: [require('@tailwindcss/forms')],
+};
+```
+
+### Styling Conventions
+
+1. **Use Tailwind utility classes exclusively** - No CSS modules or styled-components
+2. **Use `clsx` for conditional classes**:
+
+```typescript
+import clsx from 'clsx';
+
+const className = clsx(
+  'flex h-10 w-10 items-center justify-center',
+  {
+    'bg-blue-600 text-white': isActive,
+    'hover:bg-gray-100': !isActive,
+  },
+);
+```
+
+3. **Responsive design** with Tailwind breakpoints:
+   - `sm:` - 640px
+   - `md:` - 768px
+   - `lg:` - 1024px
+
+```typescript
+<div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+```
+
+4. **Component-level styles** - Add utility classes directly to JSX
+5. **Global styles** - Only in `app/ui/global.css` for Tailwind imports
+
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Minimal custom utilities only */
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+```
+
+### Font Management
+
+Define fonts in `/app/ui/fonts.ts`:
+
+```typescript
+import { Inter, Lusitana } from 'next/font/google';
+
+export const inter = Inter({ subsets: ['latin'] });
+export const lusitana = Lusitana({
+  weight: ['400', '700'],
+  subsets: ['latin'],
+});
+```
+
+Use in layouts and components:
+
+```typescript
+<body className={`${inter.className} antialiased`}>{children}</body>
+<h1 className={`${lusitana.className} mb-4 text-xl md:text-2xl`}>Dashboard</h1>
+```
+
+### Icons
+
+Use Heroicons from specific size variants:
+
+```typescript
+import {
+  UserGroupIcon,
+  HomeIcon,
+  DocumentDuplicateIcon,
+} from '@heroicons/react/24/outline';  // For line icons
+
+// In JSX
+<HomeIcon className="w-6" />
+```
+
+### Skeleton Loading States
+
+Create shimmer effect for loading states:
+
+```typescript
+// app/ui/skeletons.tsx
+const shimmer =
+  'before:absolute before:inset-0 before:-translate-x-full before:animate-[shimmer_2s_infinite] before:bg-gradient-to-r before:from-transparent before:via-white/60 before:to-transparent';
+
+export function CardSkeleton() {
+  return (
+    <div
+      className={`${shimmer} relative overflow-hidden rounded-xl bg-gray-100 p-2 shadow-sm`}
+    >
+      <div className="flex p-4">
+        <div className="h-5 w-5 rounded-md bg-gray-200" />
+        <div className="ml-2 h-6 w-16 rounded-md bg-gray-200 text-sm font-medium" />
+      </div>
+      <div className="flex items-center justify-center truncate rounded-xl bg-white px-4 py-8">
+        <div className="h-7 w-20 rounded-md bg-gray-200" />
+      </div>
+    </div>
+  );
+}
+```
+
+## Authentication with NextAuth
+
+### Configuration Files
+
+Split into two files:
+
+**`auth.config.ts`** - Shared config (can be used in middleware):
+
+```typescript
+import type { NextAuthConfig } from 'next-auth';
+
+export const authConfig = {
+  pages: {
+    signIn: '/login',
+  },
+  providers: [],  // Added later in auth.ts
+  callbacks: {
+    authorized({ auth, request: { nextUrl } }) {
+      const isLoggedIn = !!auth?.user;
+      const isOnDashboard = nextUrl.pathname.startsWith('/dashboard');
+
+      if (isOnDashboard) {
+        if (isLoggedIn) return true;
+        return false;  // Redirect to login
+      } else if (isLoggedIn) {
+        return Response.redirect(new URL('/dashboard', nextUrl));
+      }
+      return true;
+    },
+  },
+} satisfies NextAuthConfig;
+```
+
+**`auth.ts`** - Full auth implementation:
+
+```typescript
+import NextAuth from 'next-auth';
+import Credentials from 'next-auth/providers/credentials';
+import bcrypt from 'bcrypt';
+import { z } from 'zod';
+import { authConfig } from './auth.config';
+
+async function getUser(email: string): Promise<User | undefined> {
+  try {
+    const user = await sql<User[]>`SELECT * FROM users WHERE email=${email}`;
+    return user[0];
+  } catch (error) {
+    console.error('Failed to fetch user:', error);
+    throw new Error('Failed to fetch user.');
+  }
+}
+
+export const { auth, signIn, signOut } = NextAuth({
+  ...authConfig,
+  providers: [
+    Credentials({
+      async authorize(credentials) {
+        const parsedCredentials = z
+          .object({ email: z.string().email(), password: z.string().min(6) })
+          .safeParse(credentials);
+
+        if (parsedCredentials.success) {
+          const { email, password } = parsedCredentials.data;
+          const user = await getUser(email);
+          if (!user) return null;
+
+          const passwordsMatch = await bcrypt.compare(password, user.password);
+          if (passwordsMatch) return user;
+        }
+
+        return null;
+      },
+    }),
+  ],
+});
+```
+
+### Login Server Action
+
+```typescript
+// app/lib/actions.ts
+'use server';
+
+import { signIn } from '@/auth';
+import { AuthError } from 'next-auth';
+
+export async function authenticate(
+  prevState: string | undefined,
+  formData: FormData,
+) {
+  try {
+    await signIn('credentials', formData);
+  } catch (error) {
+    if (error instanceof AuthError) {
+      switch (error.type) {
+        case 'CredentialsSignin':
+          return 'Invalid credentials.';
+        default:
+          return 'Something went wrong.';
+      }
+    }
+    throw error;
+  }
+}
+```
+
+### Protected Routes
+
+Routes under `/dashboard/*` are automatically protected by the auth config. Unauthenticated users are redirected to `/login`.
+
+## Accessibility Guidelines
+
+Always follow these accessibility patterns:
+
+1. **Form Labels**: Associate labels with inputs using `htmlFor` and `id`
+
+```typescript
+<label htmlFor="email" className="mb-2 block text-sm font-medium">
+  Email
+</label>
+<input
+  id="email"
+  name="email"
+  type="email"
+  required
+/>
+```
+
+2. **ARIA Attributes** for error messages:
+
+```typescript
+<input
+  id="amount"
+  name="amount"
+  aria-describedby="amount-error"
+/>
+<div id="amount-error" aria-live="polite" aria-atomic="true">
+  {errors?.amount?.map((error: string) => (
+    <p className="mt-2 text-sm text-red-500" key={error}>{error}</p>
+  ))}
+</div>
+```
+
+3. **Semantic HTML**: Use proper elements
+
+```typescript
+<fieldset>
+  <legend className="mb-2 block text-sm font-medium">
+    Set the invoice status
+  </legend>
+  {/* Radio buttons */}
+</fieldset>
+```
+
+4. **Screen Reader Text**: Use `.sr-only` for icon-only buttons
+
+```typescript
+<button className="...">
+  <span className="sr-only">Edit</span>
+  <PencilIcon className="w-5" />
+</button>
+```
+
+5. **Navigation**: Use proper ARIA for current page
+
+```typescript
+<Link
+  href={link.href}
+  className={clsx({
+    'bg-sky-100 text-blue-600': pathname === link.href,
+  })}
+  aria-current={pathname === link.href ? 'page' : undefined}
+>
+  {link.name}
+</Link>
+```
+
+## Performance Patterns
+
+### Streaming with Suspense
+
+Break up slow components into Suspense boundaries:
+
+```typescript
+export default async function Page() {
+  return (
+    <main>
+      {/* Fast content renders immediately */}
+      <h1>Dashboard</h1>
+
+      {/* Slow content streams in */}
+      <Suspense fallback={<CardsSkeleton />}>
+        <CardWrapper />
+      </Suspense>
+
+      <Suspense fallback={<LatestInvoicesSkeleton />}>
+        <LatestInvoices />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+### Parallel Data Fetching
+
+Fetch independent data in parallel:
+
+```typescript
+const data = await Promise.all([
+  fetchInvoices(),
+  fetchCustomers(),
+  fetchRevenue(),
+]);
+```
+
+### Cache Revalidation
+
+After mutations, revalidate the cache:
+
+```typescript
+import { revalidatePath } from 'next/cache';
+
+export async function createInvoice(formData: FormData) {
+  // ... database insert
+
+  revalidatePath('/dashboard/invoices');  // Refresh this page's cache
+  redirect('/dashboard/invoices');
+}
+```
+
+### Pagination
+
+Implement server-side pagination:
+
+```typescript
+const ITEMS_PER_PAGE = 6;
+
+export async function fetchFilteredInvoices(
+  query: string,
+  currentPage: number,
+) {
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+
+  const invoices = await sql<InvoicesTable[]>`
+    SELECT * FROM invoices
+    WHERE name ILIKE ${`%${query}%`}
+    ORDER BY date DESC
+    LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
+  `;
+
+  return invoices;
+}
+```
+
+## Best Practices Checklist
+
+When adding features to this project, ensure you:
+
+### Architecture
+- [ ] Use Server Components by default
+- [ ] Only mark components as client when needed
+- [ ] Keep Server Actions in `/app/lib/actions.ts`
+- [ ] Keep data fetching in `/app/lib/data.ts`
+- [ ] Keep types in `/app/lib/definitions.ts`
+
+### Components
+- [ ] Organize components by domain in `/app/ui/`
+- [ ] Use proper TypeScript types for all props
+- [ ] Extend HTML element props when appropriate
+- [ ] Use PascalCase for component names
+
+### Data Fetching
+- [ ] Use raw SQL with parameterized queries
+- [ ] Type all database queries: `sql<Type[]>`
+- [ ] Use try-catch for error handling
+- [ ] Fetch in parallel with `Promise.all()` when possible
+- [ ] Use Suspense for streaming slow components
+
+### Forms
+- [ ] Define Zod schemas for validation
+- [ ] Use Server Actions with `'use server'`
+- [ ] Use `useActionState` in client components
+- [ ] Return errors in State object
+- [ ] Display errors with ARIA attributes
+- [ ] Call `revalidatePath()` after mutations
+- [ ] Redirect after successful mutations
+
+### Styling
+- [ ] Use Tailwind utility classes exclusively
+- [ ] Use `clsx` for conditional classes
+- [ ] Use responsive prefixes (`sm:`, `md:`, `lg:`)
+- [ ] Import fonts from `/app/ui/fonts.ts`
+- [ ] Use Heroicons from `/24/outline`
+- [ ] Create skeleton components for loading states
+
+### Routing
+- [ ] Use `page.tsx` for routes
+- [ ] Use `layout.tsx` for shared layouts
+- [ ] Use route groups `(name)` for organization
+- [ ] Use `[param]` for dynamic routes
+- [ ] Implement search with debouncing
+- [ ] Use URL search params for state
+
+### Accessibility
+- [ ] Associate labels with inputs
+- [ ] Use ARIA attributes for errors
+- [ ] Use semantic HTML elements
+- [ ] Add screen reader text for icon buttons
+- [ ] Use `aria-current` for navigation
+
+### TypeScript
+- [ ] Enable strict mode
+- [ ] Define types in `definitions.ts`
+- [ ] Type all function parameters and returns
+- [ ] Use string union types for enums
+- [ ] Use path aliases: `@/app/...`
+
+### Security
+- [ ] Use parameterized SQL queries
+- [ ] Hash passwords with bcrypt
+- [ ] Validate user input with Zod
+- [ ] Protect routes with NextAuth
+- [ ] Use environment variables for secrets
+
+## Common Patterns Reference
+
+### Create a New Page
+
+1. Create `page.tsx` in appropriate folder:
+```typescript
+// app/dashboard/[feature]/page.tsx
+import { fetchData } from '@/app/lib/data';
+
+export default async function Page() {
+  const data = await fetchData();
+
+  return (
+    <div className="w-full">
+      <h1>Page Title</h1>
+      {/* Content */}
+    </div>
+  );
+}
+```
+
+2. Add metadata:
+```typescript
+export const metadata: Metadata = {
+  title: 'Page Title',
+};
+```
+
+### Create a Form
+
+1. Define Zod schema in `actions.ts`:
+```typescript
+const Schema = z.object({
+  field: z.string().min(1, 'Required'),
+});
+```
+
+2. Create Server Action:
+```typescript
+export async function submitForm(prevState: State, formData: FormData) {
+  const validated = Schema.safeParse({
+    field: formData.get('field'),
+  });
+
+  if (!validated.success) {
+    return { errors: validated.error.flatten().fieldErrors };
+  }
+
+  // Database operation
+  await sql`INSERT INTO table ...`;
+
+  revalidatePath('/path');
+  redirect('/path');
+}
+```
+
+3. Create Form component:
+```typescript
+'use client';
+
+export default function Form() {
+  const [state, formAction] = useActionState(submitForm, initialState);
+
+  return (
+    <form action={formAction}>
+      {/* Fields with error display */}
+    </form>
+  );
+}
+```
+
+### Add a Data Fetching Function
+
+```typescript
+// app/lib/data.ts
+export async function fetchItems(query: string) {
+  try {
+    const items = await sql<Item[]>`
+      SELECT * FROM items
+      WHERE name ILIKE ${`%${query}%`}
+    `;
+    return items;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch items.');
+  }
+}
+```
+
+### Create a Reusable Component
+
+```typescript
+// app/ui/[domain]/component-name.tsx
+interface ComponentProps {
+  prop: string;
+}
+
+export function Component({ prop }: ComponentProps) {
+  return (
+    <div className="...">
+      {prop}
+    </div>
+  );
+}
+```
+
+## Environment Variables
+
+Required environment variables (see `.env.example`):
+
+```bash
+# PostgreSQL Database
+POSTGRES_URL="postgres://user:password@host:5432/database"
+
+# NextAuth
+AUTH_SECRET="generated-secret-key"  # Generate with: openssl rand -base64 32
+AUTH_URL="http://localhost:3000/api/auth"
+```
+
+## Development Commands
+
+```bash
+# Development with Turbopack
+pnpm dev
+
+# Production build
+pnpm build
+
+# Start production server
+pnpm start
+
+# Seed database (visit /seed route)
+# Navigate to http://localhost:3000/seed
+```
+
+## Summary
+
+This project demonstrates a modern, server-centric Next.js application with:
+
+- **Server Components** for better performance
+- **Server Actions** for type-safe mutations
+- **PostgreSQL with raw SQL** for database access
+- **Zod validation** for forms
+- **NextAuth** for authentication
+- **Tailwind CSS** for styling
+- **TypeScript** in strict mode
+- **Accessibility** as a priority
+
+When extending this project, always follow these established patterns to maintain consistency and quality.
